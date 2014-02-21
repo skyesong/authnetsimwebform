@@ -1,0 +1,7 @@
+name = Authorize.net SIM integration for Webform
+description = Process payments for webforms using Authorize.net SIM
+core = 7.x
+version = '7.x-0.1'
+package = Webform
+dependencies[] = webform
+dependencies[] = authnet

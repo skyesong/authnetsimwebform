@@ -1,0 +1,231 @@
+<?php
+/**
+ * AuthNetSIMWebform allows the simple integration of a Webform with the Authorize.net SIM api
+ * Thanks to Jeff Geerling for the Webform Paypal code, on which this project is based
+ * http://www.midwesternmac.com/blogs/jeff-geerling/integrate-webform-3x-paypal
+ *
+ * @package default
+ *
+ 
+/**
+ * Implements hook_menu().
+ *
+ * @return unknown
+ */
+function authnetsimwebform_menu() {
+	$items = array();
+	// registers a callback page
+
+	$items['webform/thanks'] = array(
+		'title' => variable_get('authnetsimwebform_thanks_title', 'Payment Received'),
+		'description' => 'Handles donation callback request from Authorize.net',
+		'page callback' => 'authnetsimwebform_thanks',
+		'access callback' => TRUE,
+		'delivery callback' => 'authnetsimwebform_processing',
+		'type' => MENU_CALLBACK,
+	);
+	
+	$items['webform/cancel'] = array(
+		'title' => variable_get('authnetsimwebform_cancel_title', 'Payment Canceled'),
+		'description' => 'Handles cancellation from Authorize.net',
+		'page callback' => 'authnetsimwebform_cancel',
+		'access callback' => TRUE,
+		'type' => MENU_CALLBACK,
+	);
+	return $items;
+}
+
+/**
+ * Implements hook_webform_submission_insert().
+ *
+ * @param unknown $node
+ * @param unknown $submission
+ */
+function authnetsimwebform_webform_submission_insert($node, $submission) {
+	// To-do: work around hard-coding nids
+	if ($node->nid == 23 || $node->nid == 24 || $node->nid == 25 || $node->nid == 630 || $node->nid == 458 || $node->nid == 463 || $node->nid == 649) { 
+		// Get mapping of form submission data using private function (see below).
+		// Using this, we can use webform field names (like 'first_name') instead
+		// of vague mappings like $submission->data['3']['value'][0].
+		$mapping = _authnetsimwebform_webform_component_mapping($node);
+		/**
+		 * Set up form to post to Authorize.net
+		 */
+		$authnetSIM = array();
+		$amount = $submission->data[$mapping['amount']]['value'][0];
+		$authnetSIM['x_amount'] = $amount;
+		$authnetSIM['x_show_form'] = 'PAYMENT_FORM';
+		$authnetSIM['x_first_name'] = $submission->data[$mapping['first_name']]['value'][0];
+		$authnetSIM['x_last_name'] = $submission->data[$mapping['last_name']]['value'][0];
+		$authnetSIM['x_description'] = $submission->data[$mapping['description']]['value'][0];
+		$authnetSIM['x_email'] = $submission->data[$mapping['email']]['value'][0];
+		$line_items = $submission->data[$mapping['line_items']]['value'][0];
+		
+		if ($node->nid == 630) { //get line item info for books
+				$odhec_qty = $submission->data[$mapping['odhecaton']]['value'][0];
+				$odhec_price = $node->field_publication_odhecaton['und'][0]['value'];
+				$lerma_qty = $submission->data[$mapping['lerma']]['value'][0];
+				$lerma_price = $node->field_publication_lerma['und'][0]['value'];
+				$authnetSIM['x_tax'] = $submission->data[$mapping['sales_tax']]['value'][0];
+				$line_items = _authnetsimwebform_webform_books($odhec_qty, $odhec_price, $lerma_qty, $lerma_price);
+				$authnetSIM['x_freight'] = $submission->data[$mapping['shipping']]['value'][0];
+			}
+			
+		if ($node->nid == 458) { //get line item info for AEMF registration
+				$tuition = $submission->data[$mapping['tuition_due']]['value'][0];
+				$deposit = $submission->data[$mapping['i_will_pay']]['value'][0];
+				$registration = $submission->data[$mapping['registration_due']]['value'][0];
+				$commuter = $submission->data[$mapping['commuter_fee']]['value'][0];
+				$week = $submission->data[$mapping['week']]['value'][0];
+				$line_items = "";
+				if ($deposit == 'deposit') {
+					if ($week == 3) {
+						$line_items .= "1<|>deposit<|>Tuition deposit<|>1<|>200<|>N";
+						} else {
+						$line_items .= "1<|>deposit<|>Tuition deposit<|>1<|>100<|>N";
+						}
+				} else if ($deposit == 'full') {
+					$line_items .= "1<|>tuition<|>Tuition payment<|>1<|>".$tuition."<|>N";
+				}
+				$line_items .= "&x_line_item=2<|>registration<|>Registration Fee<|>1<|>".$registration."<|>N";
+				if ($commuter > 0) {
+					$line_items .= "&x_line_item=3<|>commuter<|>Commuter Fee<|>1<|>".$commuter."<|>N";
+				}
+			}
+		
+		if (variable_get('authnet_sandbox', '') == '1') {
+			$url = 'https://test.authorize.net/gateway/transact.dll';
+			#$url = 'https://developer.authorize.net/tools/paramdump/index.php';
+			$testMode = 'true';		
+			} else {
+			$url = 'https://secure.authorize.net/gateway/transact.dll';
+			$testMode = 'false';
+			}
+
+		$authnetSIM['x_test_request'] = $testMode;
+		$authnetSIM['x_relay_response'] = 'true';
+		$authnetSIM['x_relay_url'] = "http://".$_SERVER['HTTP_HOST']."/webform/thanks";
+		$authnetSIM['x_cancel_url'] = "http://".$_SERVER['HTTP_HOST']."/webform/cancel";
+		$authnetSIM['x_cancel_url_text'] = "CANCEL";
+		
+		$authnetSIM['x_invoice_num'] = $submission->sid;
+		$authnetSIM['nid'] = $node->nid;
+		$authnetSIM['origin_url'] = "http://".$_SERVER['HTTP_HOST'];
+		$loginID = variable_get('authnet_login_id', '');
+		$transactionKey = variable_get('authnet_transaction_key', '');
+		$authnetSIM['x_login'] = $loginID;
+		$sequence = 7814883337;
+		$authnetSIM['x_fp_sequence'] = $sequence;
+		$timeStamp = time();
+		$authnetSIM['x_fp_timestamp'] = $timeStamp;
+		$fingerprint = hash_hmac("md5", $loginID . "^" . $sequence . "^" . $timeStamp . "^" . $amount . "^", $transactionKey);
+		$authnetSIM['x_fp_hash'] = $fingerprint;
+		// Build the URL/query for Authorize.net payment form.
+		$query = http_build_query($authnetSIM, '', '&');
+		if ($line_items) {$query .= "&x_line_item=".$line_items;}
+		// Redirect user to Authorize.net...
+		drupal_goto($url.'?'.$query);	
+		}
+}
+
+/**
+ * Function to convert webform submissions into a nicely-mapped array.
+ *
+ * @see http://www.drupalcoder.com/story/678-additional-processing-in-drupals-webform-3-module
+ * @param unknown $node
+ * @return unknown
+ */
+function _authnetsimwebform_webform_component_mapping($node) {
+	$mapping = array();	$components = $node->webform['components'];
+	foreach ($components as $i => $component) {
+		$key = $component['form_key'];
+		$mapping[$key] = $i;	}
+
+	return $mapping;
+}
+
+/**
+ * Function to create line item information for book order
+ */
+function _authnetsimwebform_webform_books($odhec_qty, $odhec_price, $lerma_qty, $lerma_price) {
+	//create line item parameter
+	
+	$line_items = "";
+	if ($odhec_qty > 0) {
+		$line_items .= "1<|>odhecaton<|>Odhecaton A<|>".$odhec_qty."<|>".$odhec_price."<|>T";
+		if ($lerma_qty > 0) {
+			$line_items .= "&x_line_item=";
+		}
+	}
+	if ($lerma_qty > 0) {
+		$line_items .= "2<|>lerma<|>Music for the Duke of Lerma<|>".$lerma_qty."<|>".$lerma_price."<|>T";
+	}
+	return $line_items;
+}
+
+
+
+
+
+/**
+ * Callback function
+ *
+ * @return unknown
+ */
+function authnetsimwebform_thanks() {
+	
+	$payment_not_received = "There was a problem with your payment.";	// Don't even think about going any further!
+	if ((empty($_POST)) & (!isset($_POST['x_response_code']))) {
+		return drupal_set_message($payment_not_received, 'error');	
+		};
+	
+	// Previous conditions blocks if no transaction data is found, this checks if the transaction was successful
+	if ($_POST['x_response_code'] == '1'):
+
+		extract($_POST);
+	// Import variables from post array received from Authorize.net
+
+	$payment_received = "Thank you, your payment was received successfully!";
+	
+	// Update payment status to "paid" from "unpaid" if successful
+	db_update('webform_submitted_data')
+	->fields(array(
+			'data' => 'paid',
+		))
+	->condition('sid', $x_invoice_num, '=')
+	->condition('data', 'unpaid', '=')
+	->execute();	
+	
+	$element = "<meta http-equiv='refresh' content='0;URL=".$origin_url."/node/".$nid."/done?sid=".$x_invoice_num."'>";	
+	return $element;	
+	else:
+		return drupal_set_message($payment_not_received, 'error');	
+	endif;
+}
+
+/**
+ * Callback function
+ *
+ * @return unknown
+ */
+function authnetsimwebform_cancel() {
+	return array('#markup' => '<p>' . t('We received your form, but not your payment. Please try again, or send your payment by mail.') . '</p>');
+}
+
+/**
+ * Display a blank processing page
+ *
+ * @param unknown $result
+ */
+function authnetsimwebform_processing($result) {
+	print "<html>"
+		."<head>"
+		.$result
+		."</head>"
+		."<body>"
+		."processing..."
+		."</body>"
+		."</html>";
+	exit(0);
+}
+?>
